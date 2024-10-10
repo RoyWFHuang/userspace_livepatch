@@ -6,7 +6,6 @@
  * You can redistribute it and/or modify it under the terms of
  * the GNU General Public License version 2.
  */
-
 static char rcsid[] = "$Id: livepatch.c 351 2004-11-08 16:05:26Z ukai $";
 #include <stdio.h>
 #include <stdlib.h>
@@ -108,7 +107,7 @@ bfd_read_symbols(bfd *abfd, long offset, struct symaddr **symaddrp)
     int ret = 0;
 
     /* symbol table */
-    DEBUG("%s\n","SYMBOL TABLE:");
+    DEBUG("%s(%d): %s offset = %lx\n", __func__, __LINE__, "SYMBOL TABLE:", offset);
     storage_needed = bfd_get_symtab_upper_bound (abfd);
     if (storage_needed < 0) {
         bfd_perror("bfd_get_symtab_upper_bound");
@@ -135,7 +134,7 @@ bfd_read_symbols(bfd *abfd, long offset, struct symaddr **symaddrp)
             continue;
         if (bfd_is_undefined_symclass(symclass))
             continue;
-        DEBUG(" %s=%p\n", sym_name, (void *)sym_value);
+        DEBUG("%s(%d): %s=%p\n", __func__, __LINE__, sym_name, (void *)sym_value);
         add_symaddr(sym_name, sym_value, symaddrp);
     }
 dynsym:
@@ -302,8 +301,8 @@ target_symbol_initialize(pid_t pid, char *filename)
     char buf[4096];
     FILE *fp;
 
-    DEBUG("target symbol initialize: pid %d filename %s\n",
-                pid, filename);
+    DEBUG("%s(%d): target symbol initialize: pid %d filename %s\n",
+            __func__, __LINE__, pid, filename);
     snprintf(buf, sizeof(buf), "/proc/%d/maps", pid);
     DEBUG("proc map %s\n", buf);
     fp = fopen(buf, "r");
@@ -326,25 +325,22 @@ target_symbol_initialize(pid_t pid, char *filename)
 
         if (flags[0] == 'r' && flags[2] == 'x' && flags[3] == 'p'
             && pgoff != 0  && ino != 0 && *mfilename != '\0') {
+            // printf("%s(%d)- 0x%lx-0x%lx %s 0x%x %s\n",
+            //     __func__, __LINE__,
+            //     vm_start, vm_end, flags, pgoff, mfilename);
+            // printf("%s(%d): file %s @ %p\n", __func__, __LINE__,
+            //     mfilename, (void *)vm_start);
             abfd = bfd_openr(mfilename, NULL);
             if (abfd == NULL) {
                 bfd_perror("bfd_openr");
                 continue;
             }
             bfd_check_format(abfd, bfd_object);
-            bfd_read_symbols(abfd, vm_start, &symaddrs);
+            bfd_read_symbols(abfd, vm_start-pgoff, &symaddrs);
             bfd_close(abfd);
         }
     }
-    DEBUG("target file %s\n", filename);
-    abfd = bfd_openr(filename, NULL);
-    if (abfd == NULL) {
-        bfd_perror("bfd_openr");
-        return -1;
-    }
-    bfd_check_format(abfd, bfd_object);
-    bfd_read_symbols(abfd, 0, &symaddrs);
-    bfd_close(abfd);
+
     return 0;
 }
 
@@ -364,9 +360,8 @@ long
 target_alloc(pid_t pid, size_t siz)
 {
     struct user_regs_struct regs, oregs;
-    char code[] = {0xcd, 0x80, 0xcc, 0x00}; /* int $0x80, int3,  */
     long lv;
-    long raddr;
+    size_t bk_code;
 
     if (ptrace(PTRACE_GETREGS, pid, NULL, &oregs) < 0) {
         perror("ptrace getregs");
@@ -374,7 +369,12 @@ target_alloc(pid_t pid, size_t siz)
     }
 
     regs = oregs;
-    DEBUG("%%esp = %p\n", (void *)regs.rsp);
+    DEBUG("%s(%d): %%rsp = %p\n", __func__, __LINE__, (void* )regs.rsp);
+    if ( (bk_code = ptrace(PTRACE_PEEKDATA, pid, (regs.rip), NULL)) < 0) {
+        perror("ptrace get rip fail");
+        return 0;
+    }
+#if SYSTEM32
     regs.rsp -= sizeof(int);
     memcpy(&lv, code, 4);
     if (ptrace(PTRACE_POKEDATA, pid, regs.rsp, lv) < 0) {
@@ -412,72 +412,119 @@ target_alloc(pid_t pid, size_t siz)
      *
      * glibc/sysdeps/unix/sysv/linux/i386/mmap.S
      */
-    DEBUG("target_alloc %s\n", "set regs");
+#else
+
+    regs.rax = SYS_mmap;                        /* system call number (mmap) */
+    regs.rdi = 0;                               /* addr (arg 1) */
+    regs.rsi = siz;                             /* length (arg 2) */
+    regs.rdx = PROT_READ | PROT_WRITE | PROT_EXEC;          /* prot (arg 3) */
+    regs.r10 = MAP_PRIVATE | MAP_ANONYMOUS;     /* flags (arg 4) */
+    regs.r8  = 0;                              /* fd (arg 5) */
+    regs.r9  = 0;                               /* offset (arg 6) */
+#endif
+
+    DEBUG("%s(%d): target_alloc %s\n", __func__, __LINE__, "set regs");
     if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) < 0) {
         perror("ptrace set regs");
         return 0;
     }
-    DEBUG("target_allloc %s\n", "mmap call");
-    if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0) {
-        perror("ptrace cont");
+
+    DEBUG("%s(%d): target_alloc %s\n", __func__, __LINE__, "PTRACE_POKEDATA");
+    if (ptrace(PTRACE_POKEDATA, pid, regs.rip, 0x050f) < 0) { // syscall = 0f05
+        perror("ptrace PTRACE_POKEDATA");
         return 0;
     }
+
+    DEBUG("%s(%d): target_alloc %s\n", __func__, __LINE__, "PTRACE_SINGLESTEP");
+    if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) < 0) {
+        perror("PTRACE_SINGLESTEP");
+        return 0;
+    }
+
     wait(NULL);
-    DEBUG("target_alloc %s\n", "mmap done");
+
+    DEBUG("%s(%d): target_alloc %s\n", __func__, __LINE__, "mmap done");
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
         perror("ptrace get regs of mmap");
         return 0;
     }
     lv = regs.rax; /* return value */
-    if ((void *)lv == MAP_FAILED) {
+    DEBUG("%s(%d): %%rax = %p\n", __func__, __LINE__, (void* )regs.rax);
+    if (lv == (long) MAP_FAILED) {
         DEBUG("target_alloc failed %p\n", (void *)0);
         return 0;
     }
     INFO("allocated = %p %ld bytes\n", (void*)lv, siz);
 
     /* restore old regs */
+    if (ptrace(PTRACE_POKEDATA, pid, oregs.rip, bk_code) < 0) {
+        perror("ptrace restore rip");
+        return 0;
+    }
     if (ptrace(PTRACE_SETREGS, pid, NULL, &oregs) < 0) {
         perror("ptrace restore regs");
         return 0;
     }
+
     return lv;
 }
 
+#if SYSTEM32
+#   define SYSTEM_ALIGN_TYPE int
+#else
+#   define SYSTEM_ALIGN_TYPE long
+#endif
 int
-set_data(pid_t pid, int addr, void *val, int vlen)
+set_data(pid_t pid, long addr, void *val, int vlen)
 {
     int i;
-    int addr0 = addr & ~3;
-    int len = (((addr + vlen) - addr0) + 3)/4;
-    int *lv = malloc(len * sizeof(int));
+
+    // int addr0 = addr & ~3;
+    // int len = (((addr + vlen) - addr0) + 3)/4;
+    int len;
+    long addr0;
+    addr0 = addr & ~(sizeof(SYSTEM_ALIGN_TYPE) - 1);
+    len = (((addr + vlen) - addr0) + (sizeof(SYSTEM_ALIGN_TYPE) - 1))/sizeof(SYSTEM_ALIGN_TYPE);
+
+    long *lv = malloc(len * sizeof(SYSTEM_ALIGN_TYPE));
 
     DEBUG("peek: %d", len);
     for (i = 0; i < len; i++) {
         if (i % 4 == 0) {
-            DEBUG("\n %p  ", (void *)(addr0 + i * sizeof(int)));
+            DEBUG("\n %p  ", (void *)(addr0 + i * sizeof(SYSTEM_ALIGN_TYPE)));
         }
+        errno = 0;
+        DEBUG("%s(%d): pid == %d(%lu)\n", __func__, __LINE__,
+                pid, addr0 + i * sizeof(SYSTEM_ALIGN_TYPE));
+
         lv[i] = ptrace(PTRACE_PEEKDATA, pid,
-                                addr0 + i * sizeof(int), NULL);
+                addr0 + i * sizeof(SYSTEM_ALIGN_TYPE), NULL);
         if (lv[i] == -1 && errno != 0) {
-            perror("ptrace peek");
+            ERROR("ptrace peek(%d) (%d)\n",i, errno);
             return -1;
         }
-        DEBUG("%08x ", lv[i]);
+        DEBUG("%08lx ", lv[i]);
     }
     memcpy((char *)lv + (addr - addr0), val, vlen);
     DEBUG("\npoke: %d", len);
     for (i = 0; i < len; i++) {
         if (i % 4 == 0) {
-            DEBUG("\n %p  ", (void *)(addr0 + i * sizeof(int)));
+            DEBUG("\n %p  ", (void *)(addr0 + i * sizeof(SYSTEM_ALIGN_TYPE)));
         }
         if (ptrace(PTRACE_POKEDATA, pid,
-                    addr0 + i * sizeof(int), lv[i]) < 0) {
+            addr0 + i * sizeof(SYSTEM_ALIGN_TYPE), lv[i]) < 0) {
             perror("ptrace poke");
             return -1;
         }
-        DEBUG("%08x ", lv[i]);
+        DEBUG("%08lx ", lv[i]);
     }
     DEBUG("%s", "\n"); /* XXX */
+
+    // for debug using...
+    // long written_data1 = ptrace(PTRACE_PEEKTEXT, pid, addr + 0x1139, NULL);
+    // long written_data2 = ptrace(PTRACE_PEEKTEXT, pid, addr + 0x1141, NULL);
+
+    // printf("addr data check: 0x%lx 0x%lx\n", written_data1, written_data2);
     return 0;
 }
 
@@ -498,7 +545,7 @@ lookup_memvar(char *name)
         namelen = sym - name;
         sym += 1;
     }
-    // printf("lookup_memvar %s sym %s", name, sym);
+    DEBUG("%s(%d): lookup_memvar %s sym %s\n", __func__, __LINE__, name, sym);
     for (mv = memvartab; mv != NULL && mv->name != NULL; mv = mv->next) {
         if (strncmp(name, mv->name, namelen) == 0) {
             if (sym != NULL) {
@@ -527,7 +574,8 @@ set_memvar(char *name, long addr, struct symaddr *syms)
     mv->syms = syms;
     mv->next = memvartab;
     memvartab = mv;
-    DEBUG("memvar %s set to %p syms:%p\n", name, (void *)addr, syms);
+    DEBUG("%s(%d): memvar %s set to %p syms:%p\n",
+                __func__, __LINE__, name, (void *)addr, syms);
     return;
 }
 
@@ -705,6 +753,8 @@ main(int argc, char *argv[])
                 ERROR("E: invalid set line: %s", buf);
                 continue;
             }
+            printf("%s(%d): -------- call set %s %s %s-------\n",
+                __func__, __LINE__, addrinfo, type, val);
             addr = lookup_addr(addrinfo);
             parse_data(type, val, &v, &vlen);
 
@@ -802,9 +852,10 @@ main(int argc, char *argv[])
                 ERROR("E: invalid dl line: %s", buf);
                 continue;
             }
-            INFO("dl pid=%d memvar=%s filename=%s\n",
-            target_pid,
-            memname, filename);
+            printf("%s(%d): -------- call dl %s %s -------\n",
+                __func__, __LINE__, memname, filename);
+            INFO("%s(%d): dl pid=%d memvar=%s filename=%s\n",
+                        __func__, __LINE__, target_pid, memname, filename);
 
             abfd = bfd_openr(filename, NULL);
             if (abfd == NULL) {
@@ -827,7 +878,7 @@ main(int argc, char *argv[])
             INFO("global symbol fixups %s\n", filename);
             fixups(abfd, symaddrs, outbuf, outsize);
 
-            addr = target_alloc(target_pid, outsize);
+            addr = target_alloc(target_pid, outsize); //call mmap to create new section
             if (addr == 0) {
                 ERROR("E: target_alloc failed. pid=%d size=%d\n",
                     target_pid, outsize);
@@ -836,9 +887,11 @@ main(int argc, char *argv[])
 
             bfd_read_symbols(abfd, addr, &symaddr0);
             /* local */
-            INFO("local symbol fixups %s offset %p\n", filename, (void *)addr);
+            INFO("%s(%d): local symbol fixups %s offset %p\n", __func__, __LINE__,
+                filename, (void *)addr);
             fixups(abfd, symaddr0, outbuf, outsize);
             bfd_close(abfd);
+
 
             if (set_data(target_pid, addr, outbuf, outsize) < 0) {
                 ERROR("E: dl %s @ %p failed.\n", filename, (void *)addr);
