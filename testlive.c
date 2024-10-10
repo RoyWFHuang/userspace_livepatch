@@ -7,21 +7,21 @@
 int func_J(int a, int b)
 {
     char *str_P = "func_J";
-	printf("in %s\n", str_P);
-	sleep(3);
-	printf("exit %s\n", str_P);
-	return (a+b);
+    printf("in %s\n", str_P);
+    sleep(3);
+    printf("exit %s\n", str_P);
+    return (a+b);
 }
 
 
 int main ()
 {
 
-	while(1) {
-		int a = func_J(1, 2);
-		sleep(3);
-	    printf("in main %d\n", a);
-	}
+    while(1) {
+        int a = func_J(1, 2);
+        sleep(3);
+        printf("in main %d\n", a);
+    }
 
 }
 
