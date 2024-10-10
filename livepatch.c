@@ -685,6 +685,140 @@ help(char *prog)
     return;
 }
 
+void print_mem(pid_t pid, long addr) {
+    long data = ptrace(PTRACE_PEEKTEXT, pid, addr, NULL);
+    if (errno != 0) {
+        perror("ptrace peektext");
+    } else {
+        printf("Memory at %p: 0x%lx\n",(void *) addr, data);
+    }
+}
+
+
+void print_regs(struct user_regs_struct regs) {
+
+    printf("RIP: 0x%llx\n", regs.rip);
+    printf("RAX: 0x%llx\n", regs.rax);
+    printf("RBX: 0x%llx\n", regs.rbx);
+    printf("RCX: 0x%llx\n", regs.rcx);
+    printf("RDX: 0x%llx\n", regs.rdx);
+    printf("RSI: 0x%llx\n", regs.rsi);
+    printf("RDI: 0x%llx\n", regs.rdi);
+    printf("RSP: 0x%llx\n", regs.rsp);
+    printf("RBP: 0x%llx\n", regs.rbp);
+}
+
+void set_jmp_cmd(pid_t pid, long ofunc_addr, long nfunc_addr)
+{
+    unsigned char endbr64[] = {0xf3, 0x0f, 0x1e, 0xfa};
+    /* set "mov rax, addr2" cmd*/
+    unsigned char mov_rax[10] = {0x48, 0xB8};
+    *(unsigned long *)&mov_rax[2] = (unsigned long)nfunc_addr;
+    /* set "jmp rax" cmd*/
+    unsigned char jmp_rax[2] = {0xFF, 0xE0};
+
+    unsigned char code[16];
+    memcpy(code, endbr64, sizeof(endbr64));
+    memcpy(code + sizeof(endbr64), mov_rax, sizeof(mov_rax));
+    memcpy(code + sizeof(endbr64) + sizeof(mov_rax), jmp_rax, sizeof(jmp_rax));
+
+#if DEBUGMODE
+    struct user_regs_struct regs;
+    int status;
+
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
+        printf("before status\n");
+        print_regs(regs);
+    } else {
+        perror("ptrace getregs");
+    }
+#endif
+
+    ptrace(PTRACE_POKETEXT, pid, ofunc_addr, *(long *)&code[0]);
+    ptrace(PTRACE_POKETEXT, pid, ofunc_addr + 8, *(long *)&code[8]);
+
+#if DEBUGMODE
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
+        printf("after set jump status\n");
+        print_regs(regs);
+    } else {
+        perror("ptrace getregs");
+    }
+
+    if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) {
+        perror("ptrace singlestep");
+        exit(EXIT_FAILURE);
+    }
+
+    waitpid(pid, &status, 0);
+    long oldrip = regs.rip;
+
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
+        printf("start run set jump status\n");
+        print_regs(regs);
+    } else {
+        perror("ptrace getregs");
+    }
+
+    while (WIFSTOPPED(status)) {
+        if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) {
+            perror("ptrace singlestep");
+            exit(EXIT_FAILURE);
+        }
+
+        waitpid(pid, &status, 0);
+
+        long ofunc_offset = 0x1189;
+        long main_offset = 0x11e3;
+        long nfunc_offset = 0x1139;
+        long mmap_addr = 0x7f0000000000;
+        char key;
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
+            if (oldrip != regs.rip && regs.rip < mmap_addr) {
+                printf("\nAfter single step: func_J(%p), main(%p), func1(%p)\n",
+                                (void *)ofunc_addr,
+                                (void *)(ofunc_addr - ofunc_offset + main_offset),
+                                (void *)nfunc_addr);
+
+                if (regs.rip >= (ofunc_addr) &&
+                        regs.rip < (ofunc_addr - ofunc_offset + main_offset) ) {
+                    printf("in the func_J call\n");
+                } else if (regs.rip >= (ofunc_addr - ofunc_offset + main_offset) ){
+                    printf("in the main call\n");
+                } else {
+                    printf("in the system call\n");
+                }
+                print_regs(regs);
+                key = getchar();
+            } else if (oldrip != regs.rip && regs.rip >= (nfunc_addr - nfunc_offset) ) {
+                printf("\nAfter single step: func_J(%p), main(%p), func1(%p)\n",
+                                (void *)ofunc_addr,
+                                (void *)(ofunc_addr - ofunc_offset + main_offset),
+                                (void *)nfunc_addr);
+                printf("in the new function call\n");
+                print_regs(regs);
+
+                print_mem(pid, regs.rdi);
+                print_mem(pid, regs.rdi+8);
+                key=getchar();
+            }
+            oldrip = regs.rip;;
+            if(key == 'q')
+                break;
+        } else {
+            perror("ptrace(PTRACE_GETREGS)");
+        }
+
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            printf("Process exited or was killed\n");
+            break;
+        }
+    }
+
+#endif
+
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -904,8 +1038,26 @@ main(int argc, char *argv[])
         } else if (strncmp(buf, "jmp ", 4) == 0) {
             char addrinfo[4096];
             char addr2info[4096];
+            long base_addr;
             long addr;
             long addr2;
+
+            if (sscanf(buf, "jmp %s %s\n", addrinfo, addr2info) != 2) {
+                ERROR("E: invalid jmp line: %s", buf);
+                continue;
+            }
+            printf("%s(%d): -------- call jmp %s %s -------\n",
+                    __func__, __LINE__, addrinfo, addr2info);
+
+            addr = lookup_addr(addrinfo);
+            base_addr = lookup_addr("_init");
+            addr2 = lookup_addr(addr2info);
+
+            INFO("%s(%d):jmp pid=%d addr=%p(%p) addr2=%p\n",
+                    __func__, __LINE__, target_pid,
+                    (void *)addr, (void *)base_addr, (void *)addr2);
+
+#if SYSTEM32
             long jmp_relative;
             char jmpbuf[5];
 
@@ -927,6 +1079,9 @@ main(int argc, char *argv[])
                 continue;
             }
             NOTICE("jmp %p %p\n", (void *)addr, (void *)addr2);
+#else
+            set_jmp_cmd(target_pid, addr, addr2);
+#endif
         } else if (strncmp(buf, "q", 1) == 0) {
             break;
         } else {
