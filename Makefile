@@ -22,16 +22,15 @@ bfd: bfd.o
 	$(CC) -o $@ $< -lbfd
 
 clean:
-	-rm -f *.o
+	-rm -f *.o *.s *.a
 	-rm -f livepatch fixup bfd
 
-foo: foo.c
-	$(CC) -shared -fPIC -o $@.so $<
-#	objdump -D foo.so > foo.asm
+libfoo.a: libfoo.o
+	$(CC)  -shared -fPIC -o $@ $<
 
-testlive: testlive.c
+testlive: testlive.o
 	$(CC) -o $@ $<
 #	objdump -D testlive > testlive.asm
 
 
-all: livepatch foo testlive
+all: livepatch libfoo.a testlive
