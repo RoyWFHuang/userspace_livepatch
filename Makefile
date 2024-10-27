@@ -8,7 +8,7 @@
 # You can redistribute it and/or modify it under the terms of
 # the GNU General Public License version 2.
 # #
-# CFLAGS=-Wall -O2 -g
+# CFLAGS=-Wall -O2
 
 .PHONY: all clean tfile libfoo.a livepatch testlive
 
