@@ -44,10 +44,23 @@ int opt_quiet;
 /* sysdeps/i386/dl-machine.h */
 /* The i386 never uses Elf32_Rela relocations for the dynamic linker.
  *    Prelinked libraries may use Elf32_Rela though.  */
-#   define ELF_MACHINE_PLT_REL 1
+#   if SYSTEM32
+#       define ELF_MACHINE_PLT_REL 1
+#   else
+#       define ELF_MACHINE_NO_REL 1
+#   endif
 #else
 #   error Unsupported platform
 #endif
+
+
+#if SYSTEM32
+#   define SYSTEM_ALIGN_TYPE int
+#else
+#   define SYSTEM_ALIGN_TYPE long
+#endif
+
+
 
 /* glibc/elf/dl-runtime.c */
 #if (!defined ELF_MACHINE_NO_RELA && !defined ELF_MACHINE_PLT_REL) \
@@ -64,10 +77,10 @@ int opt_quiet;
 struct symaddr {
     struct symaddr *next;
     char *name;
-    long addr;
+    SYSTEM_ALIGN_TYPE addr;
 } *symaddrs;
 
-long
+SYSTEM_ALIGN_TYPE
 lookup_symaddr(char *name, struct symaddr *symaddr0)
 {
     struct symaddr *sa;
@@ -81,12 +94,12 @@ lookup_symaddr(char *name, struct symaddr *symaddr0)
 }
 
 void
-add_symaddr(const char *name, long addr, struct symaddr **symaddrp)
+add_symaddr(const char *name, SYSTEM_ALIGN_TYPE addr, struct symaddr **symaddrp)
 {
     struct symaddr *sa;
 
     if (*name == '\0')
-    return;
+        return;
 
     sa = (struct symaddr *)malloc(sizeof(struct symaddr));
     memset(sa, 0, sizeof(struct symaddr));
@@ -98,7 +111,7 @@ add_symaddr(const char *name, long addr, struct symaddr **symaddrp)
 }
 
 int
-bfd_read_symbols(bfd *abfd, long offset, struct symaddr **symaddrp)
+bfd_read_symbols(bfd *abfd, SYSTEM_ALIGN_TYPE offset, struct symaddr **symaddrp)
 {
     long storage_needed;
     asymbol **symbol_table = NULL;
@@ -193,17 +206,17 @@ bfd_load_section(bfd *abfd, char *sect_name, int *sz)
     buf = (char *)malloc(size);
     bfd_get_section_contents(abfd, sect, buf, 0, size);
     if (sz)
-    *sz = size;
+        *sz = size;
     return buf;
 }
 
 void
 fixup(bfd *abfd, ElfW(Sym) *symtab, char *strtab, PLTREL *reloc,
-      struct symaddr *symaddr0, char *outbuf, int outsize)
+      struct symaddr *symaddr0, unsigned char *outbuf, int outsize)
 {
     ElfW(Sym) *sym;
-    long rel_addr;
-    long addr;
+    SYSTEM_ALIGN_TYPE rel_addr;
+    SYSTEM_ALIGN_TYPE addr;
     char *sym_name;
 
     sym = &symtab[ELFW(R_SYM)(reloc->r_info)];
@@ -212,7 +225,7 @@ fixup(bfd *abfd, ElfW(Sym) *symtab, char *strtab, PLTREL *reloc,
     INFO("%s @ %ld 0x%lx ", sym_name, rel_addr, rel_addr);
     addr = lookup_symaddr(sym_name, symaddr0);
     if (addr) {
-        *(int *)(outbuf + rel_addr) = addr;
+        *(SYSTEM_ALIGN_TYPE *)(outbuf + rel_addr) = addr;
         INFO("= %p\n", (void *)addr);
     } else {
         INFO("= %s\n", "*UND*");
@@ -221,7 +234,7 @@ fixup(bfd *abfd, ElfW(Sym) *symtab, char *strtab, PLTREL *reloc,
 }
 
 int
-fixups(bfd *abfd, struct symaddr *symaddr0, char *outbuf, int outsize)
+fixups(bfd *abfd, struct symaddr *symaddr0, unsigned char *outbuf, int outsize)
 {
     ElfW(Sym) *symtab;
     char *strtab;
@@ -269,8 +282,8 @@ void
 bfd_map_section_alloc_size(bfd *abfd, asection *sect, void *obj)
 {
     int *outsizep = (int *)obj;
-    int vma = bfd_section_vma(sect);
-    int size = bfd_section_size(sect);
+    SYSTEM_ALIGN_TYPE vma = bfd_section_vma(sect);
+    SYSTEM_ALIGN_TYPE size = bfd_section_size(sect);
     // bfd_section_size_before_reloc
     int flags = bfd_section_flags(sect);
     if ((flags & (SEC_ALLOC|SEC_LOAD)) != 0) {
@@ -284,13 +297,13 @@ void
 bfd_map_section_buf(bfd *abfd, asection *sect, void *obj)
 {
     char *outbuf = (char *)obj;
-    long vma = bfd_section_vma(sect);
+    SYSTEM_ALIGN_TYPE vma = bfd_section_vma(sect);
     int size = bfd_section_size(sect);
     int flags = bfd_section_flags(sect);
     if ((flags & (SEC_ALLOC|SEC_LOAD)) != 0) {
-    DEBUG("section %s @ %p size %d flags 0x%0x\n",
-          bfd_section_name(sect), (void *)vma, size, flags);
-    bfd_get_section_contents(abfd, sect, outbuf + vma, 0, size);
+        DEBUG("section %s @ %p size %d flags 0x%0x\n",
+            bfd_section_name(sect), (void *)vma, size, flags);
+        bfd_get_section_contents(abfd, sect, outbuf + vma, 0, size);
     }
 }
 
@@ -312,7 +325,7 @@ target_symbol_initialize(pid_t pid, char *filename)
     }
     while (fgets(buf, sizeof(buf), fp) != NULL) {
         /* linux/fs/proc/task_mmu.c */
-        long vm_start, vm_end;
+        SYSTEM_ALIGN_TYPE vm_start, vm_end;
         int pgoff, major, minor, ino;
         char flags[5], mfilename[4096];
         if (sscanf(buf, "%lx-%lx %4s %x %d:%x %d %s",
@@ -336,7 +349,7 @@ target_symbol_initialize(pid_t pid, char *filename)
                 continue;
             }
             bfd_check_format(abfd, bfd_object);
-            bfd_read_symbols(abfd, vm_start-pgoff, &symaddrs);
+            bfd_read_symbols(abfd, vm_start - pgoff, &symaddrs);
             bfd_close(abfd);
         }
     }
@@ -360,7 +373,7 @@ long
 target_alloc(pid_t pid, size_t siz)
 {
     struct user_regs_struct regs, oregs;
-    long lv;
+    SYSTEM_ALIGN_TYPE lv;
     size_t bk_code;
 
     if (ptrace(PTRACE_GETREGS, pid, NULL, &oregs) < 0) {
@@ -450,7 +463,7 @@ target_alloc(pid_t pid, size_t siz)
     }
     lv = regs.rax; /* return value */
     DEBUG("%s(%d): %%rax = %p\n", __func__, __LINE__, (void* )regs.rax);
-    if (lv == (long) MAP_FAILED) {
+    if (lv == (SYSTEM_ALIGN_TYPE) MAP_FAILED) {
         DEBUG("target_alloc failed %p\n", (void *)0);
         return 0;
     }
@@ -469,24 +482,16 @@ target_alloc(pid_t pid, size_t siz)
     return lv;
 }
 
-#if SYSTEM32
-#   define SYSTEM_ALIGN_TYPE int
-#else
-#   define SYSTEM_ALIGN_TYPE long
-#endif
 int
-set_data(pid_t pid, long addr, void *val, int vlen)
+set_data(pid_t pid, SYSTEM_ALIGN_TYPE addr, void *val, int vlen)
 {
     int i;
-
-    // int addr0 = addr & ~3;
-    // int len = (((addr + vlen) - addr0) + 3)/4;
     int len;
-    long addr0;
+    SYSTEM_ALIGN_TYPE addr0;
     addr0 = addr & ~(sizeof(SYSTEM_ALIGN_TYPE) - 1);
     len = (((addr + vlen) - addr0) + (sizeof(SYSTEM_ALIGN_TYPE) - 1))/sizeof(SYSTEM_ALIGN_TYPE);
 
-    long *lv = malloc(len * sizeof(SYSTEM_ALIGN_TYPE));
+    SYSTEM_ALIGN_TYPE *lv = malloc(len * sizeof(SYSTEM_ALIGN_TYPE));
 
     DEBUG("peek: %d", len);
     for (i = 0; i < len; i++) {
@@ -520,22 +525,17 @@ set_data(pid_t pid, long addr, void *val, int vlen)
     }
     DEBUG("%s", "\n"); /* XXX */
 
-    // for debug using...
-    // long written_data1 = ptrace(PTRACE_PEEKTEXT, pid, addr + 0x1139, NULL);
-    // long written_data2 = ptrace(PTRACE_PEEKTEXT, pid, addr + 0x1141, NULL);
-
-    // printf("addr data check: 0x%lx 0x%lx\n", written_data1, written_data2);
     return 0;
 }
 
 struct memvar {
     struct memvar *next;
     char *name;
-    long addr;
+    SYSTEM_ALIGN_TYPE addr;
     struct symaddr *syms;
 } *memvartab;
 
-long
+SYSTEM_ALIGN_TYPE
 lookup_memvar(char *name)
 {
     struct memvar *mv;
@@ -550,7 +550,7 @@ lookup_memvar(char *name)
         if (strncmp(name, mv->name, namelen) == 0) {
             if (sym != NULL) {
                 if (isdigit(*sym)) {
-                    int offset = strtol(sym, NULL, 0);
+                    SYSTEM_ALIGN_TYPE offset = strtol(sym, NULL, 0);
                     return mv->addr + offset;
                 } else if (mv->syms != NULL) {
                     return lookup_symaddr(sym, mv->syms);
@@ -565,7 +565,7 @@ lookup_memvar(char *name)
 }
 
 void
-set_memvar(char *name, long addr, struct symaddr *syms)
+set_memvar(char *name, SYSTEM_ALIGN_TYPE addr, struct symaddr *syms)
 {
     struct memvar *mv = (struct memvar *)malloc(sizeof(struct memvar));
     memset(mv, 0, sizeof(struct memvar));
@@ -579,9 +579,10 @@ set_memvar(char *name, long addr, struct symaddr *syms)
     return;
 }
 
-long
-lookup_addr(char *addrinfo) {
-    long addr = 0;
+SYSTEM_ALIGN_TYPE
+lookup_addr(char *addrinfo)
+{
+    SYSTEM_ALIGN_TYPE addr = 0;
     DEBUG("lookup_addr %s => ", addrinfo);
     if (*addrinfo == '$') {
         addr = lookup_memvar(addrinfo+1);
@@ -609,7 +610,7 @@ parse_data(char *type, char *p, void **vptr, int *vlenp)
     } else if (strcmp(type, "addr") == 0) {
         *vptr = (int*)malloc(sizeof(int));
         *vlenp = sizeof(int);
-        *(long *)*vptr = lookup_addr(p);
+        *(SYSTEM_ALIGN_TYPE *)*vptr = lookup_addr(p);
     } else if (strcmp(type, "hex") == 0) {
         int i;
         int v;
@@ -685,8 +686,8 @@ help(char *prog)
     return;
 }
 
-void print_mem(pid_t pid, long addr) {
-    long data = ptrace(PTRACE_PEEKTEXT, pid, addr, NULL);
+void print_mem(pid_t pid, SYSTEM_ALIGN_TYPE addr) {
+    SYSTEM_ALIGN_TYPE data = ptrace(PTRACE_PEEKTEXT, pid, addr, NULL);
     if (errno != 0) {
         perror("ptrace peektext");
     } else {
@@ -708,12 +709,13 @@ void print_regs(struct user_regs_struct regs) {
     printf("RBP: 0x%llx\n", regs.rbp);
 }
 
-void set_jmp_cmd(pid_t pid, long ofunc_addr, long nfunc_addr)
+
+void set_jmp_cmd(pid_t pid, SYSTEM_ALIGN_TYPE ofunc_addr, SYSTEM_ALIGN_TYPE nfunc_addr)
 {
     unsigned char endbr64[] = {0xf3, 0x0f, 0x1e, 0xfa};
     /* set "mov rax, addr2" cmd*/
     unsigned char mov_rax[10] = {0x48, 0xB8};
-    *(unsigned long *)&mov_rax[2] = (unsigned long)nfunc_addr;
+    *(unsigned SYSTEM_ALIGN_TYPE *)&mov_rax[2] = (unsigned long)nfunc_addr;
     /* set "jmp rax" cmd*/
     unsigned char jmp_rax[2] = {0xFF, 0xE0};
 
@@ -722,100 +724,8 @@ void set_jmp_cmd(pid_t pid, long ofunc_addr, long nfunc_addr)
     memcpy(code + sizeof(endbr64), mov_rax, sizeof(mov_rax));
     memcpy(code + sizeof(endbr64) + sizeof(mov_rax), jmp_rax, sizeof(jmp_rax));
 
-#if DEBUGMODE
-    struct user_regs_struct regs;
-    int status;
-
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
-        printf("before status\n");
-        print_regs(regs);
-    } else {
-        perror("ptrace getregs");
-    }
-#endif
-
     ptrace(PTRACE_POKETEXT, pid, ofunc_addr, *(long *)&code[0]);
     ptrace(PTRACE_POKETEXT, pid, ofunc_addr + 8, *(long *)&code[8]);
-
-#if DEBUGMODE
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
-        printf("after set jump status\n");
-        print_regs(regs);
-    } else {
-        perror("ptrace getregs");
-    }
-
-    if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) {
-        perror("ptrace singlestep");
-        exit(EXIT_FAILURE);
-    }
-
-    waitpid(pid, &status, 0);
-    long oldrip = regs.rip;
-
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
-        printf("start run set jump status\n");
-        print_regs(regs);
-    } else {
-        perror("ptrace getregs");
-    }
-
-    while (WIFSTOPPED(status)) {
-        if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) {
-            perror("ptrace singlestep");
-            exit(EXIT_FAILURE);
-        }
-
-        waitpid(pid, &status, 0);
-
-        long ofunc_offset = 0x1189;
-        long main_offset = 0x11e3;
-        long nfunc_offset = 0x1139;
-        long mmap_addr = 0x7f0000000000;
-        char key;
-        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
-            if (oldrip != regs.rip && regs.rip < mmap_addr) {
-                printf("\nAfter single step: func_J(%p), main(%p), func1(%p)\n",
-                                (void *)ofunc_addr,
-                                (void *)(ofunc_addr - ofunc_offset + main_offset),
-                                (void *)nfunc_addr);
-
-                if (regs.rip >= (ofunc_addr) &&
-                        regs.rip < (ofunc_addr - ofunc_offset + main_offset) ) {
-                    printf("in the func_J call\n");
-                } else if (regs.rip >= (ofunc_addr - ofunc_offset + main_offset) ){
-                    printf("in the main call\n");
-                } else {
-                    printf("in the system call\n");
-                }
-                print_regs(regs);
-                key = getchar();
-            } else if (oldrip != regs.rip && regs.rip >= (nfunc_addr - nfunc_offset) ) {
-                printf("\nAfter single step: func_J(%p), main(%p), func1(%p)\n",
-                                (void *)ofunc_addr,
-                                (void *)(ofunc_addr - ofunc_offset + main_offset),
-                                (void *)nfunc_addr);
-                printf("in the new function call\n");
-                print_regs(regs);
-
-                print_mem(pid, regs.rdi);
-                print_mem(pid, regs.rdi+8);
-                key=getchar();
-            }
-            oldrip = regs.rip;;
-            if(key == 'q')
-                break;
-        } else {
-            perror("ptrace(PTRACE_GETREGS)");
-        }
-
-        if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            printf("Process exited or was killed\n");
-            break;
-        }
-    }
-
-#endif
 
 }
 
@@ -879,7 +789,7 @@ main(int argc, char *argv[])
             char addrinfo[4096];
             char type[4096];
             char val[4096];
-            long addr;
+            SYSTEM_ALIGN_TYPE addr;
             void *v;
             int vlen;
 
@@ -904,7 +814,7 @@ main(int argc, char *argv[])
             char memname[4096];
             char sizeinfo[4096];
             int siz;
-            long addr;
+            SYSTEM_ALIGN_TYPE addr;
 
             if (sscanf(buf, "new %s %s\n", memname, sizeinfo) != 2) {
                 ERROR("E: invalid new line: %s", buf);
@@ -927,7 +837,7 @@ main(int argc, char *argv[])
             char filename[4096];
             struct stat st;
             char *p;
-            long addr;
+            SYSTEM_ALIGN_TYPE addr;
             FILE *fp;
 
             if (sscanf(buf, "load %s %s\n", memname, filename) != 2) {
@@ -977,9 +887,9 @@ main(int argc, char *argv[])
             char memname[4096];
             char filename[4096];
             bfd *abfd;
-            char *outbuf;
+            unsigned char *outbuf;
             int outsize;
-            long addr;
+            SYSTEM_ALIGN_TYPE addr;
             struct symaddr *symaddr0 = NULL;
 
             if (sscanf(buf, "dl %s %s\n", memname, filename) != 2) {
@@ -999,7 +909,7 @@ main(int argc, char *argv[])
             bfd_check_format(abfd, bfd_object);
             outsize = 0;
             bfd_map_over_sections(abfd, bfd_map_section_alloc_size, &outsize);
-            outbuf = (char *)malloc(outsize);
+            outbuf = (unsigned char *)malloc(outsize);
             if (outbuf == NULL) {
                 ERROR("E: malloc failed. size=%d\n", outsize);
                 continue;
@@ -1034,13 +944,15 @@ main(int argc, char *argv[])
             set_memvar(memname, addr, symaddr0);
             NOTICE("dl %s @ %p [%d] %s\n", memname, (void *)addr,
                         outsize, filename);
+            NOTICE("memory range %p - %p\n", (void *)addr,
+                        (void *)(addr + outsize));
 
         } else if (strncmp(buf, "jmp ", 4) == 0) {
             char addrinfo[4096];
             char addr2info[4096];
-            long base_addr;
-            long addr;
-            long addr2;
+            SYSTEM_ALIGN_TYPE base_addr;
+            SYSTEM_ALIGN_TYPE o_addr;
+            SYSTEM_ALIGN_TYPE n_addr;
 
             if (sscanf(buf, "jmp %s %s\n", addrinfo, addr2info) != 2) {
                 ERROR("E: invalid jmp line: %s", buf);
@@ -1049,13 +961,13 @@ main(int argc, char *argv[])
             printf("%s(%d): -------- call jmp %s %s -------\n",
                     __func__, __LINE__, addrinfo, addr2info);
 
-            addr = lookup_addr(addrinfo);
+            o_addr = lookup_addr(addrinfo);
             base_addr = lookup_addr("_init");
-            addr2 = lookup_addr(addr2info);
+            n_addr = lookup_addr(addr2info);
 
             INFO("%s(%d):jmp pid=%d addr=%p(%p) addr2=%p\n",
                     __func__, __LINE__, target_pid,
-                    (void *)addr, (void *)base_addr, (void *)addr2);
+                    (void *)o_addr, (void *)base_addr, (void *)n_addr);
 
 #if SYSTEM32
             long jmp_relative;
@@ -1080,7 +992,7 @@ main(int argc, char *argv[])
             }
             NOTICE("jmp %p %p\n", (void *)addr, (void *)addr2);
 #else
-            set_jmp_cmd(target_pid, addr, addr2);
+            set_jmp_cmd(target_pid, o_addr, n_addr);
 #endif
         } else if (strncmp(buf, "q", 1) == 0) {
             break;
