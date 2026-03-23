@@ -1,0 +1,26 @@
+# Object files & intermediates
+*.o
+*.s
+
+# Binaries (Makefile targets)
+/livepatch
+/fixup
+/bfd
+/testlive
+
+# Shared library example
+/libfoo.so
+/libfoo.a
+
+# objdump outputs from Makefile
+*.asm
+*.sect
+
+# Core dumps
+core
+core.*
+vgcore.*
+
+# Optional: local toolchain / editor
+compile_commands.json
+.cache/
